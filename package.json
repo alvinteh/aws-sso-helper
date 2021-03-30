@@ -1,0 +1,14 @@
+{
+  "name": "aws-sso-helper",
+  "author": "Alvin Teh <alvinteh@amazon.com> (https://alvinteh.me)",
+  "description": "A helper for syncing AWS SSO users using input CSV files",
+  "license": "MIT",
+  "version": "0.1.0",
+  "main": "index.js",
+  "dependencies": {
+    "commander": "^7.2.0",
+    "csv-parse": "^4.15.3",
+    "got": "^11.8.2",
+    "winston": "^3.3.3"
+  }
+}
