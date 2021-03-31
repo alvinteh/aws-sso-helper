@@ -7,10 +7,10 @@ const winston = require('winston');
 
 // Set up program options
 program
-    .option('-f, --file <file>', 'CSV file containing users to sync')
-    .option('-e, --endpoint <scim_endpoint>', 'AWS SSO SCIM endpoint')
-    .option('-t, --token <access_token>', 'AWS SSO Access Token')
-    .option('-l, --log <log_level>', 'Logging level (error/warn/info)', 'info');
+    .option('-f, --file <file>', 'CSV file containing users to sync', '')
+    .option('-e, --endpoint <scim_endpoint>', 'AWS SSO SCIM endpoint', process.env.endpoint)
+    .option('-t, --token <access_token>', 'AWS SSO Access Token', process.env.token)
+    .option('-l, --log <log_level>', 'Logging level (error/warn/info)', process.env.log || 'info');
 program.parse(process.argv);
 
 const options = program.opts();
@@ -36,13 +36,34 @@ const logger = winston.createLogger({
             )
         })
     ],
-  });
+});
 
-const run = async () => {
+const run = async (csv) => {
     const ssoUsers = await getUsers();
-    const csvUsers = await parseCSVFile(options.file);
+    const csvUsers = await parseCSVString(csv);
 
-    syncUsers(ssoUsers, csvUsers);
+    return syncUsers(ssoUsers, csvUsers);
+};
+
+const parseCSVString = async (csvString) => {
+    logger.info(`Parsing CSV string.`);
+
+    return await new Promise((resolve) => {
+        try {
+            const records = [];
+            
+            parse(csvString.trim(), { columns: true, trim: true, skip_empty_lines: true })
+                .on('data', (record) => {
+                    records.push(record);
+                })
+                .on('end', () => {
+                    resolve(records);
+                });
+        }
+        catch (error) {
+            logger.error(`Error parsing CSV file`, error);
+        }
+    });
 };
 
 const parseCSVFile = async (filename) => {
@@ -133,8 +154,11 @@ const syncUsers = async (ssoUsers, csvUsers) => {
         }
     });
 
-    logger.info(`Completed creating ${userCreationSuccesses}/${userCreations.length} ` +
-        `and deleting ${userDeletionSuccesses}/${userDeletions.length} user(s).`);
+    const response = `Completed creating ${userCreationSuccesses}/${userCreations.length} ` +
+        `and deleting ${userDeletionSuccesses}/${userDeletions.length} user(s).`;
+    
+    logger.info(response);
+    return response;
 };
 
 const createUser = async (csvUser) => {
@@ -237,4 +261,6 @@ const deleteUser = async (ssoUser) => {
     });
 };
 
-run();
+module.exports.handler = async (event, context) => {
+    return await run(event.data);
+};
