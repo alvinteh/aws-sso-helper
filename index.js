@@ -1,5 +1,6 @@
 const fs = require('fs');
 
+const AWS = require('aws-sdk');
 const { program } = require('commander');
 const parse = require('csv-parse');
 const got = require('got');
@@ -41,21 +42,53 @@ const logger = winston.createLogger({
     ],
   });
 
-const run = async (filename) => {
+// Configure the AWS SDK (if running as a Lambda function)
+if (IS_LAMBDA) {
+    AWS.config.update({ region: process.env.AWS_REGION });
+}
+
+const run = async (filename, bucket) => {
+    const csvFile = IS_LAMBDA ? getS3File(bucket, filename) : getLocalFile(filename);
+    const csvUsers = await parseCSVFile(csvFile);
     const ssoUsers = await getSSOUsers();
-    const csvUsers = await parseCSVFile(filename);
 
     return syncUsers(ssoUsers, csvUsers);
 };
 
-const parseCSVFile = async (filename) => {
-    logger.info(`Parsing CSV file ${filename}.`);
+const getS3File = (bucket, filename) => {
+    logger.info(`Getting S3 file.`);
 
-    return await new Promise((resolve) => {
+    try {
+        const s3 = new AWS.S3();
+    
+        return s3.getObject({ Bucket: bucket, Key: filename }).createReadStream();
+    }
+    catch (error) {
+        const errorMessage = 'Error getting S3 file.';
+        logger.error(errorMessage, error);
+    }
+};
+
+const getLocalFile = (filename) => {
+    logger.info(`Getting local file.`);
+
+    try {
+        return fs.createReadStream(filename);
+    }
+    catch (error) {
+        const errorMessage = 'Error getting local file.';
+        logger.error(errorMessage, error);
+    }
+}
+
+const parseCSVFile = async (readStream) => {
+    logger.info(`Parsing CSV file.`);
+
+    return await new Promise((resolve, reject) => {
         const records = [];
         
         try {
-            fs.createReadStream(filename)
+            readStream
                 .pipe(parse({ columns: true, trim: true, skip_empty_lines: true }))
                 .on('data', (record) => {
                     records.push(record);
@@ -65,7 +98,9 @@ const parseCSVFile = async (filename) => {
                 });
         }
         catch (error) {
-            logger.error(`Error parsing CSV file`, error);
+            const errorMessage = 'Error parsing CSV file.';
+            logger.error(errorMessage, error);
+            reject(errorMessage);
         }
     });
 };
@@ -73,74 +108,80 @@ const parseCSVFile = async (filename) => {
 const getSSOUsers = async () => {
     logger.info('Getting users');
 
-    try {
-        const { body } = await got.get(`${options.endpoint}/Users`, {
-            headers: {
-                'Authorization': `Bearer ${options.token}`
-            },
-            responseType: 'json'
-        });
+    return new Promise(async (resolve, reject) => {
+        try {
+            const { body } = await got.get(`${options.endpoint}/Users`, {
+                headers: {
+                    'Authorization': `Bearer ${options.token}`
+                },
+                responseType: 'json'
+            });
 
-        logger.info(`Got ${body.totalResults} user(s)`);
+            logger.info(`Got ${body.totalResults} user(s)`);
 
-        return body.Resources;
-    }
-    catch (error) {
-        logger.error(`Error getting users`, error);
-    }
+            resolve(body.Resources);
+        }
+        catch (error) {
+            const errorMessage = 'Error getting users.';
+            logger.error(errorMessage, error);
+            reject(errorMessage)
+        }
+    });
 };
 
 const syncUsers = async (ssoUsers, csvUsers) => {
     logger.info(`Syncing user(s).`);
 
-    const ssoUserEmails = ssoUsers.map((ssoUser) => {
-        return ssoUser.userName.toLowerCase();
+    return new Promise(async (resolve) => {
+        const ssoUserEmails = ssoUsers.map((ssoUser) => {
+            return ssoUser.userName.toLowerCase();
+        });
+
+        const csvUserEmails = csvUsers.map((csvUser) => {
+            return csvUser.email.toLowerCase();
+        });
+
+        const userCreations = [];
+        const userDeletions = [];
+
+        csvUsers.forEach((csvUser) => {
+            // Create users if they do not exist in SSO
+            if (ssoUserEmails.indexOf(csvUser.email.toLowerCase()) === -1) {
+                userCreations.push(createUser(csvUser));
+            }
+        });
+
+        ssoUsers.forEach((ssoUser) => {
+            // Delete users if they do not exist in CSV
+            if (csvUserEmails.indexOf(ssoUser.userName.toLowerCase()) === -1) {
+                userDeletions.push(deleteUser(ssoUser));
+            }
+        });
+
+        const userCreationResults = await Promise.all(userCreations);
+        const userDeletionResults = await Promise.all(userDeletions);
+
+        let userCreationSuccesses = 0;
+        let userDeletionSuccesses = 0;
+
+        userCreationResults.forEach((userCreationResult) => { 
+            if (!(userCreationResult instanceof Error)) {
+                userCreationSuccesses++;
+            }
+        });
+
+        userDeletionResults.forEach((userDeletionResult) => { 
+            if (!(userDeletionResult instanceof Error)) {
+                userDeletionSuccesses++;
+            }
+        });
+
+        const response = `Completed creating ${userCreationSuccesses}/${userCreations.length} ` +
+            `and deleting ${userDeletionSuccesses}/${userDeletions.length} user(s).`;
+
+        logger.info(response);
+        resolve(response);
     });
-
-    const csvUserEmails = csvUsers.map((csvUser) => {
-        return csvUser.email.toLowerCase();
-    });
-
-    const userCreations = [];
-    const userDeletions = [];
-
-    csvUsers.forEach((csvUser) => {
-        // Create users if they do not exist in SSO
-        if (ssoUserEmails.indexOf(csvUser.email.toLowerCase()) === -1) {
-            userCreations.push(createUser(csvUser));
-        }
-    });
-
-    ssoUsers.forEach((ssoUser) => {
-        // Delete users if they do not exist in CSV
-        if (csvUserEmails.indexOf(ssoUser.userName.toLowerCase()) === -1) {
-            userDeletions.push(deleteUser(ssoUser));
-        }
-    });
-
-    const userCreationResults = await Promise.all(userCreations);
-    const userDeletionResults = await Promise.all(userDeletions);
-
-    let userCreationSuccesses = 0;
-    let userDeletionSuccesses = 0;
-
-    userCreationResults.forEach((userCreationResult) => { 
-        if (!(userCreationResult instanceof Error)) {
-            userCreationSuccesses++;
-        }
-    });
-
-    userDeletionResults.forEach((userDeletionResult) => { 
-        if (!(userDeletionResult instanceof Error)) {
-            userDeletionSuccesses++;
-        }
-    });
-
-    const response = `Completed creating ${userCreationSuccesses}/${userCreations.length} ` +
-        `and deleting ${userDeletionSuccesses}/${userDeletions.length} user(s).`;
-    
-    logger.info(response);
-    return response;
 };
 
 const createUser = async (csvUser) => {
@@ -168,16 +209,16 @@ const createUser = async (csvUser) => {
             // externalId: '',
             userName: csvUser.email,
             name: {
-            familyName: csvUser.familyName,
-            givenName: csvUser.givenName,
+                familyName: csvUser.familyName,
+                givenName: csvUser.givenName,
             },
             displayName: csvUser.displayName,
             emails: [
-            {
-                value: csvUser.email,
-                type: 'work',
-                primary: true
-            }
+                {
+                    value: csvUser.email,
+                    type: 'work',
+                    primary: true
+                }
             ],
             active: true
         }
@@ -245,7 +286,7 @@ const deleteUser = async (ssoUser) => {
 
 if (IS_LAMBDA) {
     module.exports.handler = async (event, context) => {
-        return await run(event.file);
+        return await run(event.file, event.bucket);
     };
 }
 else {

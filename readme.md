@@ -25,5 +25,5 @@ This utility script helps create/delete users in AWS SSO based on a supplied CSV
 
 The helper script performs little in the way of validation. In addition, only 5 SCIM attributes (`givenName`, `familyName`, `displayName`, `email` and `userName`) are currently populated.
 
-The script can also be run as a Lambda function. Set the `endpoint`, `token` and `log` level options environment variables in Lambda, and invoke the function with an event with the `file` property (i.e. `{ file: 'https://path/to/your/file.txt }`)
+The script can also be run as a Lambda function. Ensure your function's execution role has read access to the S3 bucket with the CSV file, set the `endpoint`, `token` and `log` level options environment variables in Lambda, and invoke the function with an event with the `bucket` and `file` properties (i.e. `{ bucket: 'my-bucket', file: 'my-users.csv' }`).
 
