@@ -5,12 +5,15 @@ const parse = require('csv-parse');
 const got = require('got');
 const winston = require('winston');
 
+// Constant for detecting if script is running as a Lambda function 
+const IS_LAMBDA = !!process.env.LAMBDA_TASK_ROOT;
+
 // Set up program options
 program
     .option('-f, --file <file>', 'CSV file containing users to sync')
-    .option('-e, --endpoint <scim_endpoint>', 'AWS SSO SCIM endpoint')
-    .option('-t, --token <access_token>', 'AWS SSO Access Token')
-    .option('-l, --log <log_level>', 'Logging level (error/warn/info)', 'info');
+    .option('-e, --endpoint <scim_endpoint>', 'AWS SSO SCIM endpoint', process.env.endpoint)
+    .option('-t, --token <access_token>', 'AWS SSO Access Token', process.env.token)
+    .option('-l, --log <log_level>', 'Logging level (error/warn/info)', process.env.log || 'info');
 program.parse(process.argv);
 
 const options = program.opts();
@@ -38,11 +41,11 @@ const logger = winston.createLogger({
     ],
   });
 
-const run = async () => {
-    const ssoUsers = await getUsers();
-    const csvUsers = await parseCSVFile(options.file);
+const run = async (filename) => {
+    const ssoUsers = await getSSOUsers();
+    const csvUsers = await parseCSVFile(filename);
 
-    syncUsers(ssoUsers, csvUsers);
+    return syncUsers(ssoUsers, csvUsers);
 };
 
 const parseCSVFile = async (filename) => {
@@ -67,7 +70,7 @@ const parseCSVFile = async (filename) => {
     });
 };
 
-const getUsers = async () => {
+const getSSOUsers = async () => {
     logger.info('Getting users');
 
     try {
@@ -133,8 +136,11 @@ const syncUsers = async (ssoUsers, csvUsers) => {
         }
     });
 
-    logger.info(`Completed creating ${userCreationSuccesses}/${userCreations.length} ` +
-        `and deleting ${userDeletionSuccesses}/${userDeletions.length} user(s).`);
+    const response = `Completed creating ${userCreationSuccesses}/${userCreations.length} ` +
+        `and deleting ${userDeletionSuccesses}/${userDeletions.length} user(s).`;
+    
+    logger.info(response);
+    return response;
 };
 
 const createUser = async (csvUser) => {
@@ -237,4 +243,11 @@ const deleteUser = async (ssoUser) => {
     });
 };
 
-run();
+if (IS_LAMBDA) {
+    module.exports.handler = async (event, context) => {
+        return await run(event.file);
+    };
+}
+else {
+    run(options.file);
+}
